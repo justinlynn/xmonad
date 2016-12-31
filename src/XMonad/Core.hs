@@ -26,7 +26,8 @@ module XMonad.Core (
     runX, catchX, userCode, userCodeDef, io, catchIO, installSignalHandlers, uninstallSignalHandlers,
     withDisplay, withWindowSet, isRoot, runOnWorkspaces,
     getAtom, spawn, spawnPID, xfork, getXMonadDir, recompile, trace, whenJust, whenX,
-    atom_WM_STATE, atom_WM_PROTOCOLS, atom_WM_DELETE_WINDOW, atom_WM_TAKE_FOCUS, ManageHook, Query(..), runQuery
+    atom_WM_STATE, atom_WM_PROTOCOLS, atom_WM_DELETE_WINDOW, atom_WM_TAKE_FOCUS, withWindowAttributes,
+    ManageHook, Query(..), runQuery
   ) where
 
 import XMonad.StackSet hiding (modify)
@@ -49,7 +50,7 @@ import System.Process
 import System.Directory
 import System.Exit
 import Graphics.X11.Xlib
-import Graphics.X11.Xlib.Extras (Event)
+import Graphics.X11.Xlib.Extras (getWindowAttributes, WindowAttributes, Event)
 import Data.Typeable
 import Data.List ((\\))
 import Data.Maybe (isJust,fromMaybe)
@@ -206,6 +207,12 @@ withDisplay   f = asks display >>= f
 -- | Run a monadic action with the current stack set
 withWindowSet :: (WindowSet -> X a) -> X a
 withWindowSet f = gets windowset >>= f
+
+-- | Safely access window attributes.
+withWindowAttributes :: Display -> Window -> (WindowAttributes -> X ()) -> X ()
+withWindowAttributes dpy win f = do
+    wa <- userCode (io $ getWindowAttributes dpy win)
+    catchX (whenJust wa f) (return ())
 
 -- | True if the given window is the root window
 isRoot :: Window -> X Bool
@@ -463,16 +470,27 @@ recompile force = io $ do
         err  = base ++ ".errors"
         src  = base ++ ".hs"
         lib  = dir </> "lib"
+        buildscript = dir </> "build"
     libTs <- mapM getModTime . Prelude.filter isSource =<< allFiles lib
+    useBuildscript <- do
+      exists <- doesFileExist buildscript
+      if exists
+        then executable <$> getPermissions buildscript
+        else return False
     srcT <- getModTime src
     binT <- getModTime bin
-    if force || any (binT <) (srcT : libTs)
+    buildScriptT  <- getModTime buildscript
+    let addBuildScriptT = if useBuildscript
+                          then (buildScriptT :)
+                          else id
+    if force || any (binT <) ( addBuildScriptT $ srcT : libTs)
       then do
         -- temporarily disable SIGCHLD ignoring:
         uninstallSignalHandlers
-        status <- bracket (openFile err WriteMode) hClose $ \h ->
-            waitForProcess =<< runProcess "ghc" ["--make", "xmonad.hs", "-i", "-ilib", "-fforce-recomp", "-main-is", "main", "-v0", "-o",binn] (Just dir)
-                                    Nothing Nothing Nothing (Just h)
+        status <- bracket (openFile err WriteMode) hClose $ \errHandle ->
+            waitForProcess =<< if useBuildscript
+                               then compileScript binn dir buildscript errHandle
+                               else compileGHC binn dir errHandle
 
         -- re-enable SIGCHLD:
         installSignalHandlers
@@ -487,7 +505,7 @@ recompile force = io $ do
             -- nb, the ordering of printing, then forking, is crucial due to
             -- lazy evaluation
             hPutStrLn stderr msg
-            forkProcess $ executeFile "xmessage" True ["-default", "okay", msg] Nothing
+            forkProcess $ executeFile "xmessage" True ["-default", "okay", replaceUnicode msg] Nothing
             return ()
         return (status == ExitSuccess)
       else return True
@@ -498,6 +516,24 @@ recompile force = io $ do
             cs <- prep <$> E.catch (getDirectoryContents t) (\(SomeException _) -> return [])
             ds <- filterM doesDirectoryExist cs
             concat . ((cs \\ ds):) <$> mapM allFiles ds
+       -- Replace some of the unicode symbols GHC uses in its output
+       replaceUnicode = map $ \c -> case c of
+           '\8226' -> '*'  -- •
+           '\8216' -> '`'  -- ‘
+           '\8217' -> '`'  -- ’
+           _ -> c
+       compileGHC binn dir errHandle =
+         runProcess "ghc" ["--make"
+                          , "xmonad.hs"
+                          , "-i"
+                          , "-ilib"
+                          , "-fforce-recomp"
+                          , "-main-is", "main"
+                          , "-v0"
+                          , "-o", binn
+                          ] (Just dir) Nothing Nothing Nothing (Just errHandle)
+       compileScript binn dir script errHandle =
+         runProcess script [binn] (Just dir) Nothing Nothing Nothing (Just errHandle)
 
 -- | Conditionally run an action, using a @Maybe a@ to decide.
 whenJust :: Monad m => Maybe a -> (a -> m ()) -> m ()

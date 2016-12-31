@@ -31,7 +31,8 @@ build-type:         Simple
 tested-with:
                     GHC==7.6.3,
                     GHC==7.8.4,
-                    GHC==7.10.2
+                    GHC==7.10.3,
+                    GHC==8.0.1
 
 data-files:         man/xmonad.hs, man/xmonad.1, man/xmonad.1.html
 
@@ -42,11 +43,17 @@ source-repository head
 flag testing
     description: Testing mode, only build minimal components
     default: False
+    manual: True
 
 flag generatemanpage
     description: Build the tool for generating the man page
     default: False
     manual: True
+
+flag profiling
+     description: Enable profiling
+     default: False
+     manual: True
 
 library
     hs-source-dirs:     src
@@ -71,7 +78,7 @@ library
                    process,
                    unix,
                    utf8-string >= 0.3 && < 1.1,
-                   X11>=1.5 && < 1.7
+                   X11>=1.7 && < 1.8
 
     if true
         ghc-options:        -funbox-strict-fields -Wall
@@ -83,7 +90,8 @@ library
         -- needed for XMonad.Config's instance Default (XConfig a)
 
 
-    ghc-prof-options:   -prof -auto-all
+    if flag(profiling)
+        ghc-prof-options:   -prof -auto-all
 
     if flag(testing)
         buildable: False
